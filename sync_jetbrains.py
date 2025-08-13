@@ -52,50 +52,66 @@ def parse_jetbrains_page(url):
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 查找最新版本标题 - 使用更通用的选择器
-        version_header = soup.select_one('h4[data-test="version-header"]')
-        if not version_header:
-            # 回退方案：尝试其他可能的标题位置
-            version_header = soup.select_one('h4.wt-h4, h4.wt-h3, h4.title')
+        # 方法1: 从JSON-LD数据中提取版本号
+        version = None
+        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+        for script in json_ld_scripts:
+            try:
+                data = json.loads(script.string)
+                if 'softwareVersion' in data:
+                    version = data['softwareVersion']
+                    print(f"从JSON-LD提取版本号: {version}")
+                    break
+            except:
+                pass
         
-        version_text = version_header.get_text(strip=True) if version_header else ""
-        print(f"版本标题文本: '{version_text}'")
+        # 方法2: 从页面标题中提取版本号
+        if not version:
+            title = soup.find('title')
+            if title:
+                title_text = title.get_text()
+                # 匹配类似 "IntelliJ IDEA | Other Versions" 的标题
+                match = re.search(r'(\d{4}\.\d+(?:\.\d+)?)', title_text)
+                if match:
+                    version = match.group(1)
+                    print(f"从页面标题提取版本号: {version}")
         
-        # 提取版本号
-        version_match = re.search(r'(\d{4}\.\d+(?:\.\d+)?)', version_text)
-        if not version_match:
-            # 尝试从表格内容中提取版本号
-            version_cell = soup.select_one('td:contains("Version")')
-            if version_cell:
-                version_match = re.search(r'(\d{4}\.\d+(?:\.\d+)?)', version_cell.get_text())
+        # 方法3: 从JavaScript变量中提取版本号
+        if not version:
+            scripts = soup.find_all('script')
+            for script in scripts:
+                if script.string and 'navigationMenu' in script.string:
+                    # 查找类似 "version": "2025.2" 的文本
+                    match = re.search(r'"version":\s*"(\d{4}\.\d+(?:\.\d+)?)"', script.string)
+                    if match:
+                        version = match.group(1)
+                        print(f"从JavaScript变量提取版本号: {version}")
+                        break
         
-        if not version_match:
-            raise Exception(f"无法提取版本号: {version_text}")
-        
-        version = version_match.group(1)
-        print(f"检测到最新版本: {version}")
+        if not version:
+            raise Exception("无法提取版本号")
         
         # 查找Linux下载链接 - 使用更可靠的方法
         linux_links = {}
         
         # 方案1: 查找包含"Linux"文本的行
-        linux_row = soup.find(lambda tag: tag.name == 'tr' and 'Linux' in tag.get_text())
+        linux_row = soup.find('tr', string=lambda text: text and 'Linux' in text)
         
         if linux_row:
             # 查找主下载按钮
-            primary_link = linux_row.select_one('a.download-link.dl-button[data-test="download-button"]')
-            if primary_link:
+            primary_link = linux_row.find('a', class_=lambda c: c and 'dl-button' in c and 'secondary' not in c)
+            if primary_link and primary_link.get('href'):
                 linux_links['ultimate'] = primary_link['href']
             
             # 查找次要下载按钮
-            secondary_link = linux_row.select_one('a.download-link.dl-button.secondary[data-test="download-button"]')
-            if secondary_link:
+            secondary_link = linux_row.find('a', class_=lambda c: c and 'dl-button' in c and 'secondary' in c)
+            if secondary_link and secondary_link.get('href'):
                 linux_links['community'] = secondary_link['href']
         
         # 方案2: 如果方案1失败，尝试通过文件名识别
         if not linux_links:
             print("方法1未找到链接，尝试方法2")
-            all_links = soup.select('a[href]')
+            all_links = soup.find_all('a', href=True)
             for link in all_links:
                 href = link['href']
                 if 'linux' in href or '.tar.gz' in href:
