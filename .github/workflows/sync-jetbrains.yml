@@ -32,8 +32,3 @@ jobs:
         PRODUCT_URL: "https://www.jetbrains.com/idea/download/other.html"
       run: python sync_jetbrains.py
       
-    - name: 同步PyCharm
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        PRODUCT_URL: "https://www.jetbrains.com/pycharm/download/other.html"
-      run: python sync_jetbrains.py
