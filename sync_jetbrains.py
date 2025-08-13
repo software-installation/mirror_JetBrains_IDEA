@@ -45,47 +45,144 @@ def parse_jetbrains_page(url):
     try:
         print(f"正在解析页面: {url}")
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
         }
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 查找所有版本表格
-        version_tables = soup.select('table.downloads')
-        if not version_tables:
-            raise Exception("未找到版本表格")
+        # 尝试不同的选择器来查找版本表格
+        table_selectors = [
+            'table[data-test="downloads-table"]',  # 新选择器
+            'table.downloads',                     # 旧选择器
+            'table.wt-table'                       # 备用选择器
+        ]
         
-        # 获取最新版本
-        latest_table = version_tables[0]
-        version_header = latest_table.find_previous_sibling('h4')
+        version_table = None
+        for selector in table_selectors:
+            tables = soup.select(selector)
+            if tables:
+                version_table = tables[0]
+                print(f"使用选择器 '{selector}' 找到版本表格")
+                break
+        
+        if not version_table:
+            # 尝试回退方法：查找包含"Download"的表格
+            all_tables = soup.find_all('table')
+            for table in all_tables:
+                if 'Download' in table.get_text():
+                    version_table = table
+                    print("通过文本内容找到版本表格")
+                    break
+        
+        if not version_table:
+            raise Exception("无法找到版本表格")
+        
+        # 获取版本号 - 尝试不同的位置
+        version_header = None
+        header_selectors = [
+            version_table.find_previous_sibling('h4'),
+            version_table.find_previous_sibling('h3'),
+            version_table.find_previous_sibling('h2'),
+            soup.find('h4', {'data-test': 'version-header'}),
+            soup.find('h3', {'data-test': 'version-header'}),
+            soup.find('h2', {'data-test': 'version-header'})
+        ]
+        
+        for header in header_selectors:
+            if header:
+                version_header = header
+                break
+        
+        if not version_header:
+            # 尝试在表格上方查找版本号
+            prev_element = version_table.find_previous_sibling()
+            while prev_element:
+                if prev_element.name in ['h2', 'h3', 'h4', 'p']:
+                    version_header = prev_element
+                    break
+                prev_element = prev_element.find_previous_sibling()
+        
         version_text = version_header.get_text(strip=True) if version_header else ""
+        print(f"版本标题文本: '{version_text}'")
         
         # 提取版本号
         version_match = re.search(r'(\d{4}\.\d+(?:\.\d+)?)', version_text)
         if not version_match:
+            # 尝试从表格内容中提取版本号
+            for row in version_table.select('tr'):
+                if 'Version' in row.get_text():
+                    version_match = re.search(r'(\d{4}\.\d+(?:\.\d+)?)', row.get_text())
+                    if version_match:
+                        break
+        
+        if not version_match:
             raise Exception(f"无法提取版本号: {version_text}")
+        
         version = version_match.group(1)
         print(f"检测到最新版本: {version}")
         
         # 查找Linux下载链接
         linux_links = {}
-        for row in latest_table.select('tr'):
-            if 'Linux' in row.get_text():
-                primary_link = row.select_one('a.dl-button[data-tracking*="linux"]')
-                secondary_link = row.select_one('a.dl-button.secondary[data-tracking*="linux"]')
+        for row in version_table.select('tr'):
+            row_text = row.get_text()
+            if 'Linux' in row_text:
+                # 尝试不同的选择器
+                primary_link = row.select_one('a.download-link.dl-button[data-test="download-button"]')
+                if not primary_link:
+                    primary_link = row.select_one('a.dl-button[data-tracking*="linux"]')
+                if not primary_link:
+                    primary_link = row.select_one('a.dl-button.primary')
+                
+                secondary_link = row.select_one('a.download-link.dl-button.secondary[data-test="download-button"]')
+                if not secondary_link:
+                    secondary_link = row.select_one('a.dl-button.secondary[data-tracking*="linux"]')
+                if not secondary_link:
+                    secondary_link = row.select_one('a.dl-button.secondary')
                 
                 if primary_link:
                     linux_links['ultimate'] = primary_link['href']
                 if secondary_link:
                     linux_links['community'] = secondary_link['href']
                 
+                # 如果没有找到链接，尝试从行中提取所有链接
+                if not linux_links:
+                    all_links = row.select('a[href]')
+                    for link in all_links:
+                        href = link['href']
+                        if 'linux' in href or '.tar.gz' in href:
+                            if 'ultimate' not in linux_links:
+                                linux_links['ultimate'] = href
+                            elif 'community' not in linux_links:
+                                linux_links['community'] = href
+                
                 if linux_links:
                     break
         
         if not linux_links:
+            # 最终回退：从整个表格中提取所有链接
+            print("无法从行中提取链接，尝试整个表格")
+            all_links = version_table.select('a[href]')
+            for link in all_links:
+                href = link['href']
+                if 'linux' in href or '.tar.gz' in href:
+                    if 'ultimate' not in href and 'ultimate' not in linux_links:
+                        linux_links['ultimate'] = href
+                    elif 'community' in href or 'community' not in linux_links:
+                        linux_links['community'] = href
+                    if len(linux_links) >= 2:
+                        break
+        
+        if not linux_links:
             raise Exception("未找到Linux下载链接")
+        
+        print(f"找到付费版链接: {linux_links.get('ultimate', '')}")
+        print(f"找到社区版链接: {linux_links.get('community', '')}")
         
         return {
             "version": version,
