@@ -45,68 +45,18 @@ def parse_jetbrains_page(url):
     try:
         print(f"正在解析页面: {url}")
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 尝试不同的选择器来查找版本表格
-        table_selectors = [
-            'table[data-test="downloads-table"]',  # 新选择器
-            'table.downloads',                     # 旧选择器
-            'table.wt-table'                       # 备用选择器
-        ]
-        
-        version_table = None
-        for selector in table_selectors:
-            tables = soup.select(selector)
-            if tables:
-                version_table = tables[0]
-                print(f"使用选择器 '{selector}' 找到版本表格")
-                break
-        
-        if not version_table:
-            # 尝试回退方法：查找包含"Download"的表格
-            all_tables = soup.find_all('table')
-            for table in all_tables:
-                if 'Download' in table.get_text():
-                    version_table = table
-                    print("通过文本内容找到版本表格")
-                    break
-        
-        if not version_table:
-            raise Exception("无法找到版本表格")
-        
-        # 获取版本号 - 尝试不同的位置
-        version_header = None
-        header_selectors = [
-            version_table.find_previous_sibling('h4'),
-            version_table.find_previous_sibling('h3'),
-            version_table.find_previous_sibling('h2'),
-            soup.find('h4', {'data-test': 'version-header'}),
-            soup.find('h3', {'data-test': 'version-header'}),
-            soup.find('h2', {'data-test': 'version-header'})
-        ]
-        
-        for header in header_selectors:
-            if header:
-                version_header = header
-                break
-        
+        # 查找最新版本标题 - 使用更通用的选择器
+        version_header = soup.select_one('h4[data-test="version-header"]')
         if not version_header:
-            # 尝试在表格上方查找版本号
-            prev_element = version_table.find_previous_sibling()
-            while prev_element:
-                if prev_element.name in ['h2', 'h3', 'h4', 'p']:
-                    version_header = prev_element
-                    break
-                prev_element = prev_element.find_previous_sibling()
+            # 回退方案：尝试其他可能的标题位置
+            version_header = soup.select_one('h4.wt-h4, h4.wt-h3, h4.title')
         
         version_text = version_header.get_text(strip=True) if version_header else ""
         print(f"版本标题文本: '{version_text}'")
@@ -115,11 +65,9 @@ def parse_jetbrains_page(url):
         version_match = re.search(r'(\d{4}\.\d+(?:\.\d+)?)', version_text)
         if not version_match:
             # 尝试从表格内容中提取版本号
-            for row in version_table.select('tr'):
-                if 'Version' in row.get_text():
-                    version_match = re.search(r'(\d{4}\.\d+(?:\.\d+)?)', row.get_text())
-                    if version_match:
-                        break
+            version_cell = soup.select_one('td:contains("Version")')
+            if version_cell:
+                version_match = re.search(r'(\d{4}\.\d+(?:\.\d+)?)', version_cell.get_text())
         
         if not version_match:
             raise Exception(f"无法提取版本号: {version_text}")
@@ -127,56 +75,47 @@ def parse_jetbrains_page(url):
         version = version_match.group(1)
         print(f"检测到最新版本: {version}")
         
-        # 查找Linux下载链接
+        # 查找Linux下载链接 - 使用更可靠的方法
         linux_links = {}
-        for row in version_table.select('tr'):
-            row_text = row.get_text()
-            if 'Linux' in row_text:
-                # 尝试不同的选择器
-                primary_link = row.select_one('a.download-link.dl-button[data-test="download-button"]')
-                if not primary_link:
-                    primary_link = row.select_one('a.dl-button[data-tracking*="linux"]')
-                if not primary_link:
-                    primary_link = row.select_one('a.dl-button.primary')
-                
-                secondary_link = row.select_one('a.download-link.dl-button.secondary[data-test="download-button"]')
-                if not secondary_link:
-                    secondary_link = row.select_one('a.dl-button.secondary[data-tracking*="linux"]')
-                if not secondary_link:
-                    secondary_link = row.select_one('a.dl-button.secondary')
-                
-                if primary_link:
-                    linux_links['ultimate'] = primary_link['href']
-                if secondary_link:
-                    linux_links['community'] = secondary_link['href']
-                
-                # 如果没有找到链接，尝试从行中提取所有链接
-                if not linux_links:
-                    all_links = row.select('a[href]')
-                    for link in all_links:
-                        href = link['href']
-                        if 'linux' in href or '.tar.gz' in href:
-                            if 'ultimate' not in linux_links:
-                                linux_links['ultimate'] = href
-                            elif 'community' not in linux_links:
-                                linux_links['community'] = href
-                
-                if linux_links:
-                    break
         
+        # 方案1: 查找包含"Linux"文本的行
+        linux_row = soup.find(lambda tag: tag.name == 'tr' and 'Linux' in tag.get_text())
+        
+        if linux_row:
+            # 查找主下载按钮
+            primary_link = linux_row.select_one('a.download-link.dl-button[data-test="download-button"]')
+            if primary_link:
+                linux_links['ultimate'] = primary_link['href']
+            
+            # 查找次要下载按钮
+            secondary_link = linux_row.select_one('a.download-link.dl-button.secondary[data-test="download-button"]')
+            if secondary_link:
+                linux_links['community'] = secondary_link['href']
+        
+        # 方案2: 如果方案1失败，尝试通过文件名识别
         if not linux_links:
-            # 最终回退：从整个表格中提取所有链接
-            print("无法从行中提取链接，尝试整个表格")
-            all_links = version_table.select('a[href]')
+            print("方法1未找到链接，尝试方法2")
+            all_links = soup.select('a[href]')
             for link in all_links:
                 href = link['href']
                 if 'linux' in href or '.tar.gz' in href:
-                    if 'ultimate' not in href and 'ultimate' not in linux_links:
+                    if 'ultimate' in href and 'ultimate' not in linux_links:
                         linux_links['ultimate'] = href
-                    elif 'community' in href or 'community' not in linux_links:
+                    elif 'community' in href and 'community' not in linux_links:
                         linux_links['community'] = href
-                    if len(linux_links) >= 2:
-                        break
+                    elif 'C' in href and 'community' not in linux_links:
+                        linux_links['community'] = href
+                    elif 'U' in href and 'ultimate' not in linux_links:
+                        linux_links['ultimate'] = href
+        
+        # 方案3: 如果仍然失败，使用备用域名
+        if not linux_links:
+            print("方法2未找到链接，尝试方法3")
+            product_name = extract_product_name(url)
+            linux_links = {
+                "ultimate": f"https://download.jetbrains.com/{product_name}/{product_name}IU-{version}.tar.gz",
+                "community": f"https://download.jetbrains.com/{product_name}/{product_name}IC-{version}.tar.gz"
+            }
         
         if not linux_links:
             raise Exception("未找到Linux下载链接")
